@@ -38,7 +38,7 @@ We'll consider each of these in this guide.
 
 ### Building streams
 
-A `Stream[F,O]` (formerly `Process`) represents a discrete stream of `O` values which may request evaluation of `F` effects. We'll call `F` the _effect type_ and `O` the _output type_. Let's look at some examples:
+A `Stream[F,O]` represents a discrete stream of `O` values which may request evaluation of `F` effects. We'll call `F` the _effect type_ and `O` the _output type_. Let's look at some examples:
 
 ```scala
 import fs2.Stream
@@ -46,11 +46,11 @@ import fs2.Stream
 val s0 = Stream.empty
 // s0: Stream[fs2.package.Pure, Nothing] = Stream(..)
 val s1 = Stream.emit(1)
-// s1: Stream[Nothing, Int] = Stream(..)
+// s1: Stream[[x]fs2.package.Pure[x], Int] = Stream(..)
 val s1a = Stream(1,2,3) // variadic
-// s1a: Stream[Nothing, Int] = Stream(..) // variadic
+// s1a: Stream[[x]fs2.package.Pure[x], Int] = Stream(..) // variadic
 val s1b = Stream.emits(List(1,2,3)) // accepts any Seq
-// s1b: Stream[Nothing, Int] = Stream(..)
+// s1b: Stream[[x]fs2.package.Pure[x], Int] = Stream(..)
 ```
 
 The `s1` stream has the type `Stream[Pure,Int]`. Its output type is of course `Int`, and its effect type is `Pure`, which means it does not require evaluation of any effects to produce its output. Streams that don't use any effects are called _pure_ streams. You can convert a pure stream to a `List` or `Vector` using:
@@ -162,11 +162,8 @@ FS2 streams are chunked internally for performance. You can construct an individ
 import fs2.Chunk
 
 val s1c = Stream.chunk(Chunk.array(Array(1.0, 2.0, 3.0)))
-// s1c: Stream[Nothing, Double] = Stream(..)
+// s1c: Stream[[x]fs2.package.Pure[x], Double] = Stream(..)
 ```
-
-Note: FS2 used to provide an alternative to `Chunk` which was potentially infinite and supported fusion of arbitrary operations. This type was called `Segment`.
-In FS2 0.10.x, `Segment` played a large role in the core design. In FS2 1.0, `Segment` was completely removed, as chunk based algorithms are often faster than their segment based equivalents and almost always significantly simpler.
 
 ### Basic stream operations
 
@@ -174,9 +171,9 @@ Streams have a small but powerful set of operations, some of which we've seen al
 
 ```scala
 val appendEx1 = Stream(1,2,3) ++ Stream.emit(42)
-// appendEx1: Stream[Nothing, Int] = Stream(..)
+// appendEx1: Stream[[x]fs2.package.Pure[x], Int] = Stream(..)
 val appendEx2 = Stream(1,2,3) ++ Stream.eval(IO.pure(4))
-// appendEx2: Stream[IO[A], Int] = Stream(..)
+// appendEx2: Stream[[A]IO[A], Int] = Stream(..)
 
 appendEx1.toVector
 // res17: Vector[Int] = Vector(1, 2, 3, 42)
@@ -204,7 +201,7 @@ A stream can raise errors, either explicitly, using `Stream.raiseError`, or impl
 val err = Stream.raiseError[IO](new Exception("oh noes!"))
 // err: Stream[IO, Nothing] = Stream(..)
 val err2 = Stream(1,2,3) ++ (throw new Exception("!@#$"))
-// err2: Stream[Nothing, Int] = Stream(..)
+// err2: Stream[[x]fs2.package.Pure[x], Int] = Stream(..)
 val err3 = Stream.eval(IO(throw new Exception("error in effect!!!")))
 // err3: Stream[IO, Nothing] = Stream(..)
 ```
@@ -241,7 +238,7 @@ Note that even when using `handleErrorWith` (or `attempt`) the stream will be te
 val err4 = Stream(1,2,3).covary[IO] ++
   Stream.raiseError[IO](new Exception("bad things!")) ++
   Stream.eval(IO(4))
-// err4: Stream[IO[x], Int] = Stream(..)
+// err4: Stream[[x]IO[x], Int] = Stream(..)
 
 err4.handleErrorWith { _ => Stream(0) }.compile.toList.unsafeRunSync()
 // res25: List[Int] = List(1, 2, 3, 0)
@@ -265,7 +262,7 @@ val release = IO { println("decremented: " + count.decrementAndGet); () }
 ```scala
 Stream.bracket(acquire)(_ => release).flatMap(_ => Stream(1,2,3) ++ err).compile.drain.unsafeRunSync()
 // java.lang.Exception: oh noes!
-// 	at repl.MdocSession$App.<init>(guide.md:149)
+// 	at repl.MdocSession$MdocApp.<init>(guide.md:149)
 // 	at repl.MdocSession$.app(guide.md:3)
 ```
 
@@ -348,13 +345,62 @@ else Some(c => c.size match {
 
 Otherwise, we return a function which processes the next chunk in the stream. The function first checks the size of the chunk. If it is less than the number of elements to take, it returns the chunk unmodified, causing it to be output downstream, along with the number of remaining elements to take from subsequent chunks (`n - m`). If instead, the chunks size is greater than the number of elements left to take, `n` elements are taken from the chunk and output, along with an indication that there are no more elements to take.
 
+#### Transforming streams using pulls
+
 Sometimes, `scanChunksOpt` isn't powerful enough to express the stream transformation. Regardless of how complex the job, the `fs2.Pull` type can usually express it.
 
-The `Pull[+F[_],+O,+R]` type represents a program that may pull values from one or more streams, write _output_ of type `O`, and return a _result_ of type `R`. It forms a monad in `R` and comes equipped with lots of other useful operations. See the
-[`Pull` class](https://github.com/functional-streams-for-scala/fs2/blob/series/1.0/core/shared/src/main/scala/fs2/Pull.scala)
+The `Pull[F[_],O,R]` type represents a program that may pull values from one or more streams, write _output_ of type `O`, and return a _result_ of type `R`. It forms a monad in `R` and comes equipped with lots of other useful operations. See the
+[`Pull` class](https://github.com/functional-streams-for-scala/fs2/blob/main/core/shared/src/main/scala/fs2/Pull.scala)
 for the full set of operations on `Pull`.
 
-Let's look at an implementation of `take` using `Pull`:
+A pull that writes a single output of type `Int` can be constructed with `Pull.output1`.
+
+```scala
+import fs2._
+val p1 = Pull.output1(1)
+// p1: Pull[Nothing, Int, Unit] = Output(values = Chunk(1))
+```
+
+This can be converted directly to a stream equivalent to `Stream(1)`.
+
+```scala
+val s1 = p1.stream
+// s1: Stream[Nothing, Int] = Stream(..)
+```
+
+Pulls form a monad in their result `R` and can be composed using monadic operations. The following code produces a `Pull` corresponding to `Stream(1, 2)`.
+
+```scala
+p1 >> Pull.output1(2)
+// res34: Pull[Nothing, Int, Unit] = <function1>
+```
+
+A `Pull` can be created from a stream using a variety of operations accessed under the `pull` function. For example `echo` converts a stream to its corresponding pull representation.
+
+```scala
+s1.pull.echo
+// res35: Pull[Nothing, Int, Unit] = InScope(
+//   stream = Output(values = Chunk(1)),
+//   useInterruption = false
+// )
+```
+
+
+A more useful pull is created by `uncons`. This constructs a pull that pulls the next chunk from the stream.
+
+```scala
+s1.pull.uncons
+// res36: Pull[Nothing, Nothing, Option[(Chunk[Int], Stream[Nothing, Int])]] = <function1>
+```
+
+Let’s examine its result type.
+ - The `Option` is non-empty if there is a chunk to pull from the stream. If the stream has terminated and there are no more chunks to pull then the result is `None`.
+ - `Chunk[Int]` represents the pulled chunk.
+ - `Stream[Nothing, Int]` represents the tail of the stream.
+
+Note that the output type is `Nothing` because the pull does not output any elements.
+
+Let's look at an implementation of `take` using `uncons`:
 
 ```scala
 import fs2._
@@ -365,7 +411,7 @@ def tk[F[_],O](n: Long): Pipe[F,O,O] = {
       case Some((hd,tl)) =>
         hd.size match {
           case m if m <= n => Pull.output(hd) >> go(tl, n - m)
-          case _ => Pull.output(hd.take(n.toInt)) >> Pull.done
+          case _ => Pull.output(hd.take(n.toInt))
         }
       case None => Pull.done
     }
@@ -374,7 +420,7 @@ def tk[F[_],O](n: Long): Pipe[F,O,O] = {
 }
 
 Stream(1,2,3,4).through(tk(2)).toList
-// res34: List[Int] = List(1, 2)
+// res38: List[Int] = List(1, 2)
 ```
 
 Taking this line by line:
@@ -395,11 +441,17 @@ Calling `s.pull` gives us a variety of methods which convert the stream to a `Pu
 case Some((hd,tl)) =>
   hd.size match {
     case m if m <= n => Pull.output(hd) >> go(tl, n - m)
-    case m => Pull.output(hd.take(n)) >> Pull.done
+    case m => Pull.output(hd.take(n.toInt))
   }
 ```
 
-If we receive a `Some`, we destructure the tuple as `hd: Chunk[O]` and `tl: Stream[F,O]`. We then check the size of the head chunk, similar to the logic we used in the `scanChunksOpt` version. If the chunk size is less than or equal to the remaining elements to take, the chunk is output via `Pull.output` and we then recurse on the tail by calling `go`, passing the remaining elements to take. Otherwise we output the first `n` elements of the head and indicate we are done pulling.
+If we receive a `Some`, we destructure the tuple as `hd: Chunk[O]` and `tl: Stream[F,O]`. We then check the size of the head chunk. If the chunk size is less than or equal to the remaining elements to take, the chunk is output via `Pull.output` and we then recurse on the tail of the stream `tl` by calling `go`, passing the remaining elements to take. Otherwise we output the first `n` elements of the head.
+
+```scala
+case None => Pull.done
+```
+
+A `None` is received when there are no more elements to pull from the `in` stream. We finish pulling with `Pull.done`, a pull that does nothing.
 
 ```scala
 in => go(in,n).stream
@@ -409,15 +461,28 @@ Finally, we create an anonymous function from `Stream[F,O]` to `Stream[F,O]` and
 
 ```scala
 val s2 = Stream(1,2,3,4).through(tk(2))
-// s2: Stream[Nothing, Int] = Stream(..)
+// s2: Stream[[x]Pure[x], Int] = Stream(..)
 s2.toList
-// res35: List[Int] = List(1, 2)
+// res39: List[Int] = List(1, 2)
 ```
 
 FS2 takes care to guarantee that any resources allocated by the `Pull` are released when the stream completes. Note again that _nothing happens_ when we call `.stream` on a `Pull`, it is merely converting back to the `Stream` API.
 
+In practise, explicit recursion is rarely necessary — the methods under `pull` usually recurse for us. The explicit recursion in `tk` could be removed by using `pull.take`.
+
+```scala
+import fs2._
+
+def tk[F[_],O](n: Long): Pipe[F,O,O] = {
+  in => in.pull.take(n).void.stream
+}
+
+Stream(1,2,3,4).through(tk(2)).toList
+// res41: List[Int] = List(1, 2)
+```
+
 There are lots of useful transformation functions in
-[`Stream`](https://github.com/functional-streams-for-scala/fs2/blob/series/1.0/core/shared/src/main/scala/fs2/Stream.scala)
+[`Stream`](https://github.com/functional-streams-for-scala/fs2/blob/main/core/shared/src/main/scala/fs2/Stream.scala)
 built using the `Pull` type.
 
 ### Exercises Stream Transforming
@@ -426,11 +491,11 @@ Try implementing `takeWhile`, `intersperse`, and `scan`:
 
 ```scala
 Stream.range(0,100).takeWhile(_ < 7).toList
-// res36: List[Int] = List(0, 1, 2, 3, 4, 5, 6)
+// res42: List[Int] = List(0, 1, 2, 3, 4, 5, 6)
 Stream("Alice","Bob","Carol").intersperse("|").toList
-// res37: List[String] = List("Alice", "|", "Bob", "|", "Carol")
+// res43: List[String] = List("Alice", "|", "Bob", "|", "Carol")
 Stream.range(1,10).scan(0)(_ + _).toList // running sum
-// res38: List[Int] = List(0, 1, 3, 6, 10, 15, 21, 28, 36, 45)
+// res44: List[Int] = List(0, 1, 3, 6, 10, 15, 21, 28, 36, 45)
 ```
 
 ### Concurrency
@@ -465,7 +530,7 @@ import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 
 Stream(1,2,3).merge(Stream.eval(IO { Thread.sleep(200); 4 })).compile.toVector.unsafeRunSync()
-// res40: Vector[Int] = Vector(1, 2, 3, 4)
+// res46: Vector[Int] = Vector(1, 2, 3, 4)
 ```
 
 The `merge` function supports concurrency. FS2 has a number of other useful concurrency functions like `concurrently` (runs another stream concurrently and discards its output), `interruptWhen` (halts if the left branch produces `true`), `either` (like `merge` but returns an `Either`), `mergeHaltBoth` (halts if either branch halts), and others.
@@ -522,13 +587,13 @@ val program =
       .interruptWhen(switch.get.attempt)
       .concurrently(switcher)
   }
-// program: Stream[IO[x], Unit] = Stream(..)
+// program: Stream[[x]IO[x], Unit] = Stream(..)
 
 program.compile.drain.unsafeRunSync()
-// 02:13:52.495172241
-// 02:13:53.494415494
-// 02:13:54.493982288
-// 02:13:55.494131660
+// 14:13:29.417058657
+// 14:13:30.416216550
+// 14:13:31.415607547
+// 14:13:32.415524752
 ```
 
 Let's take this line by line now, so we can understand what's going on.
@@ -567,13 +632,14 @@ val program1 =
     repeatEval(IO(println(java.time.LocalTime.now))).
     metered(1.second).
     interruptAfter(5.seconds)
-// program1: Stream[IO[x], Unit] = Stream(..)
+// program1: Stream[[x]IO[x], Unit] = Stream(..)
 
 program1.compile.drain.unsafeRunSync()
-// 02:13:57.498001444
-// 02:13:58.498377637
-// 02:13:59.498097268
-// 02:14:00.497929110
+// 14:13:34.417598695
+// 14:13:35.418017007
+// 14:13:36.417769009
+// 14:13:37.417340503
+// 14:13:38.417223721
 ```
 
 ### Talking to the external world
@@ -594,10 +660,10 @@ These are easy to deal with. Just wrap these effects in a `Stream.eval`:
 def destroyUniverse(): Unit = { println("BOOOOM!!!"); } // stub implementation // stub implementation
 
 val s = Stream.exec(IO { destroyUniverse() }) ++ Stream("...moving on")
-// s: Stream[IO[x], String] = Stream(..)
+// s: Stream[[x]IO[x], String] = Stream(..)
 s.compile.toVector.unsafeRunSync()
 // BOOOOM!!!
-// res44: Vector[String] = Vector("...moving on")
+// res50: Vector[String] = Vector("...moving on")
 ```
 
 The way you bring synchronous effects into your effect type may differ. `Sync.delay` can be used for this generally, without committing to a particular effect:
@@ -606,12 +672,12 @@ The way you bring synchronous effects into your effect type may differ. `Sync.de
 import cats.effect.Sync
 
 val T = Sync[IO]
-// T: cats.effect.kernel.Async[IO] = cats.effect.IO$$anon$4@3ddc2f3
+// T: cats.effect.kernel.Async[IO] = cats.effect.IO$$anon$4@3494375f
 val s2 = Stream.exec(T.delay { destroyUniverse() }) ++ Stream("...moving on")
-// s2: Stream[IO[x], String] = Stream(..)
+// s2: Stream[[x]IO[x], String] = Stream(..)
 s2.compile.toVector.unsafeRunSync()
 // BOOOOM!!!
-// res45: Vector[String] = Vector("...moving on")
+// res51: Vector[String] = Vector("...moving on")
 ```
 
 When using this approach, be sure the expression you pass to delay doesn't throw exceptions.
@@ -662,11 +728,11 @@ val bytes = IO.async_[Array[Byte]] { cb => c.readBytesE(cb) }
 // bytes: IO[Array[Byte]] = IO(...)
 
 Stream.eval(bytes).map(_.toList).compile.toVector.unsafeRunSync()
-// res46: Vector[List[Byte]] = Vector(List(0, 1, 2))
+// res52: Vector[List[Byte]] = Vector(List(0, 1, 2))
 ```
 
 Be sure to check out the
-[`fs2.io`](https://github.com/functional-streams-for-scala/fs2/tree/series/1.0/io/)
+[`fs2.io`](https://github.com/functional-streams-for-scala/fs2/tree/main/io/)
 package which has nice FS2 bindings to Java NIO libraries, using exactly this approach.
 
 #### Asynchronous effects (callbacks invoked multiple times)
@@ -691,7 +757,7 @@ trait CSVHandle {
 
 def rows[F[_]](h: CSVHandle)(implicit F: Async[F]): Stream[F,Row] = {
   for {
-    dispatcher <- Stream.resource(Dispatcher[F])
+    dispatcher <- Stream.resource(Dispatcher.sequential[F])
     q <- Stream.eval(Queue.unbounded[F, Option[RowOrError]])
     _ <- Stream.eval { F.delay {
       def enqueue(v: Option[RowOrError]): Unit = dispatcher.unsafeRunAndForget(q.offer(v))
@@ -707,8 +773,8 @@ def rows[F[_]](h: CSVHandle)(implicit F: Async[F]): Stream[F,Row] = {
 }
 ```
 
-See [`Queue`](https://github.com/functional-streams-for-scala/fs2/blob/series/1.0/core/shared/src/main/scala/fs2/concurrent/Queue.scala)
-for more useful methods. Most concurrent queues in FS2 support tracking their size, which is handy for implementing size-based throttling of the producer.
+See [`Queue`](https://github.com/typelevel/cats-effect/blob/series/3.x/std/shared/src/main/scala/cats/effect/std/Queue.scala)
+for more useful methods. Most concurrent queues in cats effect support tracking their size, which is handy for implementing size-based throttling of the producer.
 
 ### Reactive streams
 
@@ -735,17 +801,23 @@ To convert a `Stream` into a downstream unicast `org.reactivestreams.Publisher`:
 val stream = Stream(1, 2, 3).covary[IO]
 // stream: Stream[IO, Int] = Stream(..)
 stream.toUnicastPublisher
-// res49: Resource[IO[A], StreamUnicastPublisher[IO[A], Int]] = Bind(
+// res55: Resource[[A]IO[A], StreamUnicastPublisher[[A]IO[A], Int]] = Bind(
 //   source = Bind(
 //     source = Bind(
-//       source = Allocate(
-//         resource = cats.effect.kernel.Resource$$$Lambda$7532/0x000000080221bf30@35ba5fc8
+//       source = Bind(
+//         source = Eval(
+//           fa = Delay(
+//             thunk = cats.effect.IO$$$Lambda$12028/0x0000000802bd84a0@701318a6,
+//             event = cats.effect.tracing.TracingEvent$StackTrace
+//           )
+//         ),
+//         fs = cats.effect.std.Supervisor$$$Lambda$12688/0x0000000802d7ca10@56c2eba0
 //       ),
-//       fs = cats.effect.kernel.Resource$$Lambda$8075/0x000000080236db70@9374466
+//       fs = cats.effect.kernel.Resource$$Lambda$12362/0x0000000802ce55b8@4604db40
 //     ),
-//     fs = cats.effect.std.Dispatcher$$$Lambda$8076/0x000000080236df40@1703436e
+//     fs = cats.effect.std.Dispatcher$$$Lambda$12690/0x0000000802d7d1b0@533f2210
 //   ),
-//   fs = cats.effect.kernel.Resource$$Lambda$8075/0x000000080236db70@1b9a2124
+//   fs = cats.effect.kernel.Resource$$Lambda$12362/0x0000000802ce55b8@3b01c6f9
 // )
 ```
 
@@ -756,20 +828,30 @@ val publisher: Resource[IO, StreamUnicastPublisher[IO, Int]] = Stream(1, 2, 3).c
 // publisher: Resource[IO, StreamUnicastPublisher[IO, Int]] = Bind(
 //   source = Bind(
 //     source = Bind(
-//       source = Allocate(
-//         resource = cats.effect.kernel.Resource$$$Lambda$7532/0x000000080221bf30@420b24bb
+//       source = Bind(
+//         source = Eval(
+//           fa = Delay(
+//             thunk = cats.effect.IO$$$Lambda$12028/0x0000000802bd84a0@7adfb5d2,
+//             event = cats.effect.tracing.TracingEvent$StackTrace
+//           )
+//         ),
+//         fs = cats.effect.std.Supervisor$$$Lambda$12688/0x0000000802d7ca10@1ae1bf12
 //       ),
-//       fs = cats.effect.kernel.Resource$$Lambda$8075/0x000000080236db70@852aedf
+//       fs = cats.effect.kernel.Resource$$Lambda$12362/0x0000000802ce55b8@30e421fc
 //     ),
-//     fs = cats.effect.std.Dispatcher$$$Lambda$8076/0x000000080236df40@3f90a32c
+//     fs = cats.effect.std.Dispatcher$$$Lambda$12690/0x0000000802d7d1b0@5e70f17
 //   ),
-//   fs = cats.effect.kernel.Resource$$Lambda$8075/0x000000080236db70@124e5
+//   fs = cats.effect.kernel.Resource$$Lambda$12362/0x0000000802ce55b8@2114b5c
 // )
 publisher.use { p =>
   p.toStream[IO].compile.toList
 }
-// res50: IO[List[Int]] = Uncancelable(
-//   body = cats.effect.IO$$$Lambda$7537/0x000000080221d6c0@3cbecd73,
+// res56: IO[List[Int]] = FlatMap(
+//   ioe = Delay(
+//     thunk = cats.effect.IO$$$Lambda$12028/0x0000000802bd84a0@7adfb5d2,
+//     event = cats.effect.tracing.TracingEvent$StackTrace
+//   ),
+//   f = cats.effect.kernel.Resource$$Lambda$12692/0x0000000802d7e210@159f7d23,
 //   event = cats.effect.tracing.TracingEvent$StackTrace
 // )
 ```
@@ -781,7 +863,7 @@ A unicast publisher must have a single subscriber only.
 Want to learn more?
 
 * Worked examples: these present a nontrivial example of use of the library, possibly making use of lots of different library features.
-  * [The README example](https://github.com/functional-streams-for-scala/fs2/blob/series/1.0/docs/ReadmeExample.md)
+  * [The example](https://fs2.io/#/getstarted/example)
   * More contributions welcome! Open a PR, following the style of one of the examples above. You can either start with a large block of code and break it down line by line, or work up to something more complicated using some smaller bits of code first.
 * Detailed coverage of different modules in the library:
   * File I/O
@@ -817,16 +899,16 @@ import cats.effect.unsafe.implicits.global
 case object Err extends Throwable
 
 (Stream(1) ++ Stream(2).map(_ => throw Err)).take(1).toList
-// res52: List[Int] = List(1)
+// res58: List[Int] = List(1)
 (Stream(1) ++ Stream.raiseError[IO](Err)).take(1).compile.toList.unsafeRunSync()
-// res53: List[Int] = List(1)
+// res59: List[Int] = List(1)
 ```
 
 The `take 1` uses `Pull` but doesn't examine the entire stream, and neither of these examples will ever throw an error. This makes sense. A bit more subtle is that this code will _also_ never throw an error:
 
 ```scala
 (Stream(1) ++ Stream.raiseError[IO](Err)).take(1).compile.toList.unsafeRunSync()
-// res54: List[Int] = List(1)
+// res60: List[Int] = List(1)
 ```
 
 The reason is simple: the consumer (the `take(1)`) terminates as soon as it has an element. Once it has that element, it is done consuming the stream and doesn't bother running any further steps of it, so the stream never actually completes normally---it has been interrupted before that can occur. We may be able to see in this case that nothing follows the emitted `1`, but FS2 doesn't know this until it actually runs another step of the stream.
@@ -839,7 +921,7 @@ Stream(1).covary[IO].
           take(1).
           compile.toVector.unsafeRunSync()
 // finalized!
-// res55: Vector[Int] = Vector(1)
+// res61: Vector[Int] = Vector(1)
 ```
 
 That covers synchronous interrupts. Let's look at asynchronous interrupts. Ponder what the result of `merged` will be in this example:
@@ -848,9 +930,9 @@ That covers synchronous interrupts. Let's look at asynchronous interrupts. Ponde
 val s1 = (Stream(1) ++ Stream(2)).covary[IO]
 // s1: Stream[IO, Int] = Stream(..)
 val s2 = (Stream.empty ++ Stream.raiseError[IO](Err)).handleErrorWith { e => println(e); Stream.raiseError[IO](e) }
-// s2: Stream[IO[x], Nothing] = Stream(..)
+// s2: Stream[[x]IO[x], Nothing] = Stream(..)
 val merged = s1 merge s2 take 1
-// merged: Stream[IO[x], Int] = Stream(..)
+// merged: Stream[[x]IO[x], Int] = Stream(..)
 ```
 
 The result is highly nondeterministic. Here are a few ways it can play out:
